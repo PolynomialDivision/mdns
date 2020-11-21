@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <libubox/blobmsg.h>
 #include <libubox/uloop.h>
 #include <libubox/usock.h>
 #include <libubox/utils.h>
@@ -121,13 +122,14 @@ dns_init_answer(void)
 	blob_buf_init(&ans_buf, 0);
 }
 
-void
-dns_add_answer(int type, const uint8_t *rdata, uint16_t rdlength, int ttl)
+
+static void
+dns_add_answer_buf(struct blob_buf *add_buf, int type, const uint8_t *rdata, uint16_t rdlength, int ttl)
 {
 	struct blob_attr *attr;
 	struct dns_answer *a;
 
-	attr = blob_new(&ans_buf, 0, sizeof(*a) + rdlength);
+	attr = blob_new(add_buf, 0, sizeof(*a) + rdlength);
 	a = blob_data(attr);
 	a->type = cpu_to_be16(type);
 	a->class = cpu_to_be16(1);
@@ -136,6 +138,12 @@ dns_add_answer(int type, const uint8_t *rdata, uint16_t rdlength, int ttl)
 	memcpy(a + 1, rdata, rdlength);
 
 	dns_answer_cnt++;
+}
+
+void
+dns_add_answer(int type, const uint8_t *rdata, uint16_t rdlength, int ttl)
+{
+	dns_add_answer_buf(&ans_buf, type, rdata, rdlength, ttl);
 }
 
 void
@@ -188,22 +196,37 @@ dns_reply_a(struct interface *iface, struct sockaddr *to, int ttl)
 	struct ifaddrs *ifap, *ifa;
 	struct sockaddr_in *sa;
 	struct sockaddr_in6 *sa6;
+	static struct blob_buf ipv4_buf;
+	static struct blob_buf ipv6_buf;
 
 	getifaddrs(&ifap);
 
 	dns_init_answer();
+	
+	blob_buf_init(&ipv4_buf, 0);
+	void * ipv4 = blobmsg_open_array(&ipv4_buf, "ipv4");
+
+	blob_buf_init(&ipv6_buf, 0);
+	void * ipv6 = blobmsg_open_array(&ipv6_buf, "ipv6");
+
 	for (ifa = ifap; ifa; ifa = ifa->ifa_next) {
 		if (strcmp(ifa->ifa_name, iface->name))
 			continue;
 		if (ifa->ifa_addr->sa_family == AF_INET) {
 			sa = (struct sockaddr_in *) ifa->ifa_addr;
-			dns_add_answer(TYPE_A, (uint8_t *) &sa->sin_addr, 4, ttl);
+			dns_add_answer_buf(&ipv4_buf, TYPE_A, (uint8_t *) &sa->sin_addr, 4, ttl);
 		}
 		if (ifa->ifa_addr->sa_family == AF_INET6) {
 			sa6 = (struct sockaddr_in6 *) ifa->ifa_addr;
-			dns_add_answer(TYPE_AAAA, (uint8_t *) &sa6->sin6_addr, 16, ttl);
+			dns_add_answer_buf(&ipv6_buf, TYPE_AAAA, (uint8_t *) &sa6->sin6_addr, 16, ttl);
 		}
 	}
+	blobmsg_close_array(&ipv4_buf, ipv4);
+	blobmsg_close_array(&ipv6_buf, ipv6);
+
+	blobmsg_add_blob(&ans_buf, ipv4_buf.head);
+	blobmsg_add_blob(&ans_buf, ipv6_buf.head);
+
 	dns_send_answer(iface, to, mdns_hostname_local);
 
 	freeifaddrs(ifap);
